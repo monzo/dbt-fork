@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import os
 
 import google.auth
 import google.api_core
@@ -13,56 +14,41 @@ from dbt.logger import GLOBAL_LOGGER as logger
 
 
 BIGQUERY_CREDENTIALS_CONTRACT = {
-    'type': 'object',
-    'additionalProperties': False,
-    'properties': {
-        'method': {
-            'enum': ['oauth', 'service-account', 'service-account-json'],
-        },
-        'database': {
-            'type': 'string',
-        },
-        'schema': {
-            'type': 'string',
-        },
-        'keyfile': {
-            'type': 'string',
-        },
-        'keyfile_json': {
-            'type': 'object',
-        },
-        'timeout_seconds': {
-            'type': 'integer',
-        },
-        'location': {
-            'type': 'string',
-        },
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "method": {"enum": ["oauth", "service-account", "service-account-json"]},
+        "database": {"type": "string"},
+        "schema": {"type": "string"},
+        "keyfile": {"type": "string"},
+        "keyfile_json": {"type": "object"},
+        "timeout_seconds": {"type": "integer"},
+        "location": {"type": "string"},
     },
-    'required': ['method', 'database', 'schema'],
+    "required": ["method", "database", "schema"],
 }
 
 
 class BigQueryCredentials(Credentials):
     SCHEMA = BIGQUERY_CREDENTIALS_CONTRACT
-    ALIASES = {
-        'project': 'database',
-        'dataset': 'schema',
-    }
+    ALIASES = {"project": "database", "dataset": "schema"}
 
     @property
     def type(self):
-        return 'bigquery'
+        return "bigquery"
 
     def _connection_keys(self):
-        return ('method', 'database', 'schema', 'location')
+        return ("method", "database", "schema", "location")
 
 
 class BigQueryConnectionManager(BaseConnectionManager):
-    TYPE = 'bigquery'
+    TYPE = "bigquery"
 
-    SCOPE = ('https://www.googleapis.com/auth/bigquery',
-             'https://www.googleapis.com/auth/cloud-platform',
-             'https://www.googleapis.com/auth/drive')
+    SCOPE = (
+        "https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/drive",
+    )
 
     QUERY_TIMEOUT = 300
 
@@ -70,8 +56,7 @@ class BigQueryConnectionManager(BaseConnectionManager):
     def handle_error(cls, error, message, sql):
         logger.debug(message.format(sql=sql))
         logger.debug(error)
-        error_msg = "\n".join(
-            [item['message'] for item in error.errors])
+        error_msg = "\n".join([item["message"] for item in error.errors])
 
         raise dbt.exceptions.DatabaseException(error_msg)
 
@@ -106,7 +91,7 @@ class BigQueryConnectionManager(BaseConnectionManager):
 
     @classmethod
     def close(cls, connection):
-        connection.state = 'closed'
+        connection.state = "closed"
 
         return connection
 
@@ -121,33 +106,32 @@ class BigQueryConnectionManager(BaseConnectionManager):
         method = profile_credentials.method
         creds = google.oauth2.service_account.Credentials
 
-        if method == 'oauth':
+        if method == "oauth":
             credentials, project_id = google.auth.default(scopes=cls.SCOPE)
             return credentials
 
-        elif method == 'service-account':
+        elif method == "service-account":
             keyfile = profile_credentials.keyfile
             return creds.from_service_account_file(keyfile, scopes=cls.SCOPE)
 
-        elif method == 'service-account-json':
+        elif method == "service-account-json":
             details = profile_credentials.keyfile_json
             return creds.from_service_account_info(details, scopes=cls.SCOPE)
 
-        error = ('Invalid `method` in profile: "{}"'.format(method))
+        error = 'Invalid `method` in profile: "{}"'.format(method)
         raise dbt.exceptions.FailedToConnectException(error)
 
     @classmethod
     def get_bigquery_client(cls, profile_credentials):
         database = profile_credentials.database
         creds = cls.get_bigquery_credentials(profile_credentials)
-        location = getattr(profile_credentials, 'location', None)
-        return google.cloud.bigquery.Client(database, creds,
-                                            location=location)
+        location = getattr(profile_credentials, "location", None)
+        return google.cloud.bigquery.Client(database, creds, location=location)
 
     @classmethod
     def open(cls, connection):
-        if connection.state == 'open':
-            logger.debug('Connection is already open, skipping open.')
+        if connection.state == "open":
+            logger.debug("Connection is already open, skipping open.")
             return connection
 
         try:
@@ -161,22 +145,24 @@ class BigQueryConnectionManager(BaseConnectionManager):
 
         except Exception as e:
             raise
-            logger.debug("Got an error when attempting to create a bigquery "
-                         "client: '{}'".format(e))
+            logger.debug(
+                "Got an error when attempting to create a bigquery "
+                "client: '{}'".format(e)
+            )
 
             connection.handle = None
-            connection.state = 'fail'
+            connection.state = "fail"
 
             raise dbt.exceptions.FailedToConnectException(str(e))
 
         connection.handle = handle
-        connection.state = 'open'
+        connection.state = "open"
         return connection
 
     @classmethod
     def get_timeout(cls, conn):
-        credentials = conn['credentials']
-        return credentials.get('timeout_seconds', cls.QUERY_TIMEOUT)
+        credentials = conn["credentials"]
+        return credentials.get("timeout_seconds", cls.QUERY_TIMEOUT)
 
     @classmethod
     def get_table_from_response(cls, resp):
@@ -188,11 +174,17 @@ class BigQueryConnectionManager(BaseConnectionManager):
         conn = self.get_thread_connection()
         client = conn.handle
 
-        logger.debug('On %s: %s', conn.name, sql)
+        logger.debug("On %s: %s", conn.name, sql)
 
         job_config = google.cloud.bigquery.QueryJobConfig()
         job_config.use_legacy_sql = False
+        job_config.dry_run = not fetch
+
         query_job = client.query(sql, job_config)
+
+        # there's no results for dry run queries, so we bail early
+        if not fetch:
+            return query_job, None
 
         # this blocks until the query has completed
         with self.exception_handler(sql):
@@ -201,6 +193,9 @@ class BigQueryConnectionManager(BaseConnectionManager):
         return query_job, iterator
 
     def execute(self, sql, auto_begin=False, fetch=None):
+        if bool(os.getenv("DRY_RUN")):
+            fetch = False
+
         # auto_begin is ignored on bigquery, and only included for consistency
         _, iterator = self.raw_execute(sql, fetch=fetch)
 
@@ -210,11 +205,10 @@ class BigQueryConnectionManager(BaseConnectionManager):
             res = dbt.clients.agate_helper.empty_table()
 
         # If we get here, the query succeeded
-        status = 'OK'
+        status = "OK"
         return status, res
 
-    def create_bigquery_table(self, database, schema, table_name, callback,
-                              sql):
+    def create_bigquery_table(self, database, schema, table_name, callback, sql):
         """Create a bigquery table. The caller must supply a callback
         that takes one argument, a `google.cloud.bigquery.Table`, and mutates
         it.
@@ -243,7 +237,7 @@ class BigQueryConnectionManager(BaseConnectionManager):
         table_ref = self.table_ref(database, schema, table_name, conn)
         job_config = google.cloud.bigquery.QueryJobConfig()
         job_config.destination = table_ref
-        job_config.write_disposition = 'WRITE_TRUNCATE'
+        job_config.write_disposition = "WRITE_TRUNCATE"
 
         query_job = client.query(sql, job_config=job_config)
 
@@ -253,10 +247,11 @@ class BigQueryConnectionManager(BaseConnectionManager):
 
     def create_date_partitioned_table(self, database, schema, table_name):
         def callback(table):
-            table.partitioning_type = 'DAY'
+            table.partitioning_type = "DAY"
 
-        self.create_bigquery_table(database, schema, table_name, callback,
-                                   'CREATE DAY PARTITIONED TABLE')
+        self.create_bigquery_table(
+            database, schema, table_name, callback, "CREATE DAY PARTITIONED TABLE"
+        )
 
     @staticmethod
     def dataset(database, schema, conn):
@@ -278,7 +273,7 @@ class BigQueryConnectionManager(BaseConnectionManager):
         dataset = self.dataset(database, schema, conn)
         client = conn.handle
 
-        with self.exception_handler('drop dataset'):
+        with self.exception_handler("drop dataset"):
             for table in client.list_tables(dataset):
                 client.delete_table(table.reference)
             client.delete_dataset(dataset)
@@ -295,5 +290,5 @@ class BigQueryConnectionManager(BaseConnectionManager):
         except google.api_core.exceptions.NotFound:
             pass
 
-        with self.exception_handler('create dataset'):
+        with self.exception_handler("create dataset"):
             client.create_dataset(dataset)
